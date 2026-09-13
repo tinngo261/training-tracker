@@ -39,6 +39,7 @@
     if (s < 86400) return Math.round(s / 3600) + ' h ago';
     return Math.round(s / 86400) + ' d ago';
   }
+  const STREAK_MIN = 2;                 // sessions per week needed to keep the streak
   const exKey = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
   let toastTimer;
@@ -187,11 +188,14 @@
     pendingCount() {
       return sessions.reduce((n, s) => n + s.exercises.filter((x) => !x.synced).length, 0) + outbox.length;
     },
+    // A week counts toward the streak only with STREAK_MIN sessions or more.
+    // The current week is skipped (not broken) while it's still in progress.
     weekStreak() {
-      const weeks = new Set(this.sessions().map((s) => s.iso && mondayOf(s.iso)).filter(Boolean));
+      const counts = {};
+      this.sessions().forEach((s) => { if (s.iso) { const w = mondayOf(s.iso); counts[w] = (counts[w] || 0) + 1; } });
       let w = mondayOf(todayIso()), n = 0;
-      if (!weeks.has(w)) w = addDays(w, -7);       // this week may still be in progress
-      while (weeks.has(w)) { n++; w = addDays(w, -7); }
+      if ((counts[w] || 0) < STREAK_MIN) w = addDays(w, -7);
+      while ((counts[w] || 0) >= STREAK_MIN) { n++; w = addDays(w, -7); }
       return n;
     }
   };
@@ -411,7 +415,7 @@
 
     // Stats
     html += `<div class="card"><div class="row">
-      <div class="stat"><div class="big">${Data.weekStreak()}</div><div class="muted small">week streak</div></div>
+      <div class="stat"><div class="big">${Data.weekStreak()}</div><div class="muted small">week streak<br>(${STREAK_MIN}+ sessions)</div></div>
       <div class="stat"><div class="big">${thisWeek.length}</div><div class="muted small">sessions this week</div></div>
       <div class="stat"><div class="big">${Math.round(weekKm * 10) / 10}<span class="muted" style="font-size:14px">${planWeek ? '/' + planWeek.totalKm : ''}</span></div><div class="muted small">km this week</div></div>
     </div></div>`;
@@ -427,11 +431,114 @@
     html += `<div class="card"><h2>Recent</h2><div class="list">` + (recent.length ? recent.map((s) => `
       <a class="item" href="#history">${typeTag(s.sessionType)}<div><div class="title">${esc(fmtLong(s.iso))}${s.pending ? ' <span class="tag pending">pending</span>' : ''}</div><div class="sub">${summarizeRows(s.rows)}</div></div><div class="right">${s.rows.length}</div></a>`).join('') : '<div class="empty">No sessions yet</div>') + `</div></div>`;
 
+    html += renderCalendar();
+
     view.innerHTML = html;
+    wireCalendar();
   };
 
+  // ---------- CALENDAR ----------
+  let calMonth = null;      // 'YYYY-MM' being shown
+  let calSelected = null;   // iso of the tapped day
+
+  function renderCalendar() {
+    const today = todayIso();
+    const ym = calMonth || today.slice(0, 7);
+    const [y, m] = ym.split('-').map(Number);
+    const days = new Date(y, m, 0).getDate();
+    const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;     // Monday-first grid
+    const byDay = {};
+    Data.sessions().forEach((s) => { if (s.iso && s.iso.slice(0, 7) === ym) (byDay[s.iso] = byDay[s.iso] || []).push(s); });
+    const plan = Data.plan();
+    const sel = calSelected || today;
+
+    let cells = '';
+    for (let i = 0; i < lead; i++) cells += '<div class="cal-cell empty"></div>';
+    for (let d = 1; d <= days; d++) {
+      const iso = ym + '-' + pad2(d);
+      const ss = byDay[iso] || [];
+      const pr = plan && plan.rows.find((r) => r.iso === iso);
+      const planned = pr && iso > today && !/rest/i.test(pr.session);
+      const cls = ['cal-cell', iso === today ? 'today' : '', iso === sel ? 'selected' : '', ss.length ? 'has' : '', planned ? 'planned' : ''].join(' ');
+      cells += `<button class="${cls}" data-day="${iso}"><span class="n">${d}</span><span class="dots">${ss.slice(0, 3).map((x) => `<i class="dot ${esc(x.sessionType)}"></i>`).join('') || (planned ? '<i class="dot plan"></i>' : '')}</span></button>`;
+    }
+
+    // Detail for the selected day
+    const selSessions = Data.sessions().filter((x) => x.iso === sel);
+    const selPlan = plan && plan.rows.find((r) => r.iso === sel);
+    let detail = `<div class="cal-detail"><div class="row between"><b>${esc(fmtLong(sel))}</b>${sel === today ? '<span class="muted small">today</span>' : ''}</div>`;
+    if (selSessions.length) {
+      detail += selSessions.map((x) => `<div class="cal-sess">${typeTag(x.sessionType)} <span class="small">${summarizeRows(x.rows)}</span>${x.pending ? ' <span class="tag pending">pending</span>' : ''}</div>`).join('');
+    }
+    if (selPlan) {
+      const st = Data.planStatus(selPlan);
+      detail += `<div class="cal-plan small"><span class="muted">Plan:</span> <b>${esc(selPlan.session)}</b>${selPlan.runKm ? ` · ${selPlan.runKm} km${selPlan.targetPace ? ' @ ' + esc(selPlan.targetPace) : ''}` : ''}${st ? ` <span class="tag status ${esc(st)}">${esc(st)}</span>` : ''}</div>`;
+    }
+    if (!selSessions.length && !selPlan) detail += `<div class="muted small">Nothing logged.</div>`;
+    detail += `</div>`;
+
+    return `<div class="card cal">
+      <div class="row between cal-head">
+        <button class="btn sm ghost" data-cal="-1">‹</button>
+        <h3>${MONTHS[m - 1]} ${y}</h3>
+        <button class="btn sm ghost" data-cal="1">›</button>
+      </div>
+      <div class="cal-grid cal-dow">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d) => `<div>${d}</div>`).join('')}</div>
+      <div class="cal-grid">${cells}</div>
+      <div class="cal-legend small muted"><i class="dot push"></i>push <i class="dot pull"></i>pull <i class="dot legs"></i>legs <i class="dot cardio"></i>cardio <i class="dot plan"></i>planned</div>
+      ${detail}
+    </div>`;
+  }
+
+  function wireCalendar() {
+    $$('[data-cal]').forEach((b) => { b.onclick = () => {
+      const ym = calMonth || todayIso().slice(0, 7);
+      const [y, m] = ym.split('-').map(Number);
+      const d = new Date(y, m - 1 + Number(b.dataset.cal), 1);
+      calMonth = d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+      routes.home();
+    }; });
+    $$('[data-day]').forEach((b) => { b.onclick = () => { calSelected = b.dataset.day; routes.home(); }; });
+  }
+
   // ---------- LOG ----------
-  const logState = { exercise: '', sets: '', notes: '', type: '', iso: '', label: '', runLabel: 'Easy Run', runKm: '', runPace: '' };
+  const logState = { exercise: '', sets: '', notes: '', type: '', iso: '', label: '', runLabel: 'Easy Run', runKm: '', runPace: '',
+    // set-by-set entry
+    setsList: [], setMode: 'warmup', w: '', r: '', setNote: '', freeText: false };
+  const WARMUP_REST = 60;
+
+  // Pick an exercise: reset the set builder and prefill weight/reps from the
+  // last top working set (or the PPL start weight for a first-timer).
+  function selectExercise(name) {
+    logState.exercise = name.trim();
+    logState.setsList = []; logState.setMode = 'warmup'; logState.setNote = ''; logState.sets = ''; logState.notes = '';
+    logState.w = ''; logState.r = '';
+    const ex = Data.exercises()[exKey(name)];
+    const top = ex && ex.history[0] ? topSet(ex.history[0].sets) : null;
+    if (top) { logState.w = top.weight || ''; logState.r = top.reps; }
+    else {
+      const st = Data.strengthByKey()[exKey(name)];
+      const startW = st && !/assist/i.test(st.start) ? parseFloat(st.start) : NaN;
+      const range = st && parseRange(st.setsReps);
+      if (!isNaN(startW)) logState.w = startW;
+      if (range) logState.r = range.lo;
+    }
+    stopTimer();
+    render();
+  }
+
+  // "W:14.5x10, 19.5x8, 24.5x8x2 (note)" from the list of logged sets —
+  // identical consecutive sets collapse into the "xN" form the sheet uses.
+  function buildSetsString(list) {
+    const toks = [];
+    list.forEach((st) => {
+      const w = st.weight == null ? 'BW' : String(st.weight);
+      const prev = toks[toks.length - 1];
+      if (prev && !prev.note && !st.note && prev.w === w && prev.reps === st.reps && prev.warmup === st.warmup) { prev.count++; return; }
+      toks.push({ w, reps: st.reps, count: 1, warmup: st.warmup, note: st.note || '' });
+    });
+    return toks.map((t) => (t.warmup ? 'W:' : '') + t.w + 'x' + t.reps + (t.count > 1 ? 'x' + t.count : '') + (t.note ? ' (' + t.note + ')' : '')).join(', ');
+  }
   let timer = { end: 0, id: 0, total: 0 };
 
   routes.log = () => {
@@ -519,25 +626,50 @@
       if (strength) {
         html += `<div class="banner info small">🎯 <b>${esc(strength.setsReps)}</b> · start <b>${esc(strength.start)}</b> · ${esc(strength.increment)}${strength.notes ? `<div class="muted">${esc(strength.notes)}</div>` : ''}</div>`;
       }
-      if (hist.length) {
-        html += `<table class="hist">${hist.map((h) => `<tr><td>${esc(fmtShort(h.iso) || h.date)}</td><td>${esc(h.sets)}${h.notes ? `<div class="muted small">${esc(h.notes)}</div>` : ''}</td></tr>`).join('')}</table><hr class="sep">`;
-      } else html += `<div class="muted small" style="margin-bottom:8px">First time logging this one.</div>`;
+      html += `<div class="lastperf"><div class="lbl">Last performances</div>` + (hist.length
+        ? hist.map((h) => `<div class="lp"><span class="d">${esc(fmtShort(h.iso) || h.date)}</span><span class="v">${esc(h.sets)}</span></div>`).join('')
+        : '<div class="muted small">First time logging this one.</div>') + `</div>`;
 
       if (classify(cur) === 'cardio') {
         const labels = ['Easy Run', 'Long Run', 'Recovery Jog', 'Tempo', 'Interval', 'Race'];
         html += `<div class="field"><label>Session</label><div class="chips">${labels.map((l) => `<button class="chip ${logState.runLabel === l ? 'active' : ''}" data-runlabel="${l}">${l}</button>`).join('')}</div></div>
           <div class="row"><div class="field grow"><label>Distance (km)</label><input type="number" step="0.01" inputmode="decimal" id="run-km" value="${esc(logState.runKm)}" placeholder="5.03"></div>
-          <div class="field grow"><label>Pace (min:sec /km)</label><input type="text" inputmode="numeric" id="run-pace" value="${esc(logState.runPace)}" placeholder="7:36"></div></div>`;
+          <div class="field grow"><label>Pace (min:sec /km)</label><input type="text" inputmode="numeric" id="run-pace" value="${esc(logState.runPace)}" placeholder="7:36"></div></div>
+          <div class="field"><label>Notes</label><input type="text" id="ex-notes" value="${esc(logState.notes)}" placeholder="optional"></div>
+          <button class="btn primary block" id="finish-ex">Finish exercise</button>`;
+      } else if (logState.freeText) {
+        html += `<div class="field"><label>Sets — weight x reps[, …] (W: = warm-up)</label><input type="text" id="ex-sets" value="${esc(logState.sets)}" placeholder="W:14.5x10, 19.5x8, 24.5x8x2" autocomplete="off"></div>
+          <div class="field"><label>Notes</label><input type="text" id="ex-notes" value="${esc(logState.notes)}" placeholder="optional"></div>
+          <div id="timer-box"></div>
+          <div class="row" style="margin-top:10px"><button class="btn grow" id="rest-btn">⏱ Rest ${rest / 60} min</button><button class="btn primary grow" id="finish-ex">Finish exercise</button></div>
+          <div style="margin-top:8px"><button class="btn sm ghost" id="toggle-free">← set-by-set entry</button></div>`;
       } else {
-        html += `<div class="field"><label>Sets — weight x reps[, …] (W: = warm-up)</label><input type="text" id="ex-sets" value="${esc(logState.sets)}" placeholder="W:14.5x10, 19.5x8, 24.5x8x2" autocomplete="off"></div>`;
+        const list = logState.setsList;
+        const nW = list.filter((x) => x.warmup).length, nK = list.length - nW;
+        const mode = logState.setMode;
+        html += `
+          <div class="seg"><button class="${mode === 'warmup' ? 'active' : ''}" data-mode="warmup">Warmup <span class="cnt">${nW}</span></button><button class="${mode === 'working' ? 'active' : ''}" data-mode="working">Working <span class="cnt">${nK}</span></button></div>
+          ${list.length ? `<div class="setlist">${list.map((x, i) => `<div class="setrow ${x.warmup ? 'warm' : ''}"><span class="idx">${x.warmup ? 'W' : '#' + (list.slice(0, i + 1).filter((y) => !y.warmup).length)}</span><span class="v">${x.weight == null ? 'BW' : x.weight + ' kg'} × ${x.reps}</span>${x.note ? `<span class="muted small">${esc(x.note)}</span>` : ''}<button class="btn sm ghost danger" data-delset="${i}">✕</button></div>`).join('')}</div>` : ''}
+          <div class="setcard ${mode}">
+            <div class="row between"><span class="setcard-title">${mode.toUpperCase()} SET</span><span class="muted small">Set #${(mode === 'warmup' ? nW : nK) + 1}</span></div>
+            <div class="row">
+              <div class="field grow"><label>Weight (kg)</label><input type="number" step="0.5" inputmode="decimal" id="set-w" placeholder="kg / BW" value="${esc(logState.w)}"></div>
+              <div class="field grow"><label>Reps</label><input type="number" inputmode="numeric" id="set-r" value="${esc(logState.r)}" placeholder="10"></div>
+            </div>
+            <div class="steppers">
+              <button data-dw="-2.5">−2.5</button><button data-dw="-0.5">−0.5</button><button data-dw="0.5">+0.5</button><button data-dw="2.5">+2.5</button>
+              <span class="grow"></span>
+              <button data-dr="-1">−1</button><button data-dr="1">+1</button>
+            </div>
+            <div class="field"><label>Note (optional)</label><input type="text" id="set-note" value="${esc(logState.setNote)}" placeholder="e.g. ds 14×6, felt strong, failed"></div>
+            <div id="timer-box"></div>
+            <button class="btn primary block" id="finish-set">Finish set → Rest ${mode === 'warmup' ? WARMUP_REST + 's' : rest / 60 + ' min'}</button>
+          </div>
+          <div class="field" style="margin-top:10px"><label>Exercise note (optional)</label><input type="text" id="ex-notes" value="${esc(logState.notes)}" placeholder="goes in the Notes column"></div>
+          <button class="btn primary block bigbtn" id="finish-ex" ${list.length ? '' : 'disabled'}>FINISH EXERCISE<span>${nK} working set${nK === 1 ? '' : 's'}${nW ? ` · ${nW} warm-up` : ''}</span></button>
+          <div style="margin-top:8px"><button class="btn sm ghost" id="toggle-free">type sets as text instead</button></div>`;
       }
-      html += `<div class="field"><label>Notes</label><input type="text" id="ex-notes" value="${esc(logState.notes)}" placeholder="optional"></div>
-        <div id="timer-box"></div>
-        <div class="row" style="margin-top:10px">
-          <button class="btn grow" id="rest-btn">⏱ Rest ${rest / 60} min</button>
-          <button class="btn primary grow" id="finish-ex">Finish exercise</button>
-        </div>
-        <div style="margin-top:8px"><button class="btn sm ghost" id="clear-ex">← change exercise</button></div>`;
+      html += `<div style="margin-top:8px"><button class="btn sm ghost" id="clear-ex">← change exercise</button></div>`;
     }
     html += `</div>`;
     html += `<div class="card"><button class="btn ghost danger sm" id="discard-session">Discard session</button></div>`;
@@ -545,19 +677,41 @@
 
     // wiring
     const nameEl = $('#ex-name');
-    nameEl.onchange = () => { logState.exercise = nameEl.value.trim(); render(); };
-    nameEl.onkeydown = (e) => { if (e.key === 'Enter') { logState.exercise = nameEl.value.trim(); render(); } };
-    $$('[data-pick]').forEach((b) => { b.onclick = () => { logState.exercise = b.dataset.pick; render(); }; });
+    nameEl.onchange = () => { if (nameEl.value.trim()) selectExercise(nameEl.value); };
+    nameEl.onkeydown = (e) => { if (e.key === 'Enter' && nameEl.value.trim()) selectExercise(nameEl.value); };
+    $$('[data-pick]').forEach((b) => { b.onclick = () => selectExercise(b.dataset.pick); });
     $$('[data-runlabel]').forEach((b) => { b.onclick = () => { logState.runLabel = b.dataset.runlabel; render(); }; });
     $$('[data-del]').forEach((b) => { b.onclick = (e) => { e.stopPropagation(); if (Log.removeExercise(s, b.dataset.del)) render(); }; });
-    $$('[data-reuse]').forEach((el) => { el.onclick = () => { const x = s.exercises.find((e) => e.clientId === el.dataset.reuse); if (x) { logState.exercise = x.exercise; logState.sets = x.sets; render(); } }; });
+    $$('[data-reuse]').forEach((el) => { el.onclick = () => { const x = s.exercises.find((e) => e.clientId === el.dataset.reuse); if (x) selectExercise(x.exercise); }; });
     if ($('#ex-sets')) $('#ex-sets').oninput = (e) => { logState.sets = e.target.value; };
     if ($('#ex-notes')) $('#ex-notes').oninput = (e) => { logState.notes = e.target.value; };
     if ($('#run-km')) $('#run-km').oninput = (e) => { logState.runKm = e.target.value; };
     if ($('#run-pace')) $('#run-pace').oninput = (e) => { logState.runPace = e.target.value; };
-    if ($('#clear-ex')) $('#clear-ex').onclick = () => { logState.exercise = ''; logState.sets = ''; logState.notes = ''; stopTimer(); render(); };
+    if ($('#clear-ex')) $('#clear-ex').onclick = () => { logState.exercise = ''; logState.sets = ''; logState.notes = ''; logState.setsList = []; stopTimer(); render(); };
     if ($('#rest-btn')) $('#rest-btn').onclick = () => startTimer(rest);
     if ($('#finish-ex')) $('#finish-ex').onclick = () => finishExercise(s);
+    if ($('#toggle-free')) $('#toggle-free').onclick = () => { logState.freeText = !logState.freeText; render(); };
+    // set builder
+    $$('[data-mode]').forEach((b) => { b.onclick = () => { logState.setMode = b.dataset.mode; render(); }; });
+    $$('[data-delset]').forEach((b) => { b.onclick = () => { logState.setsList.splice(+b.dataset.delset, 1); render(); }; });
+    const wEl = $('#set-w'), rEl = $('#set-r'), nEl = $('#set-note');
+    if (wEl) wEl.oninput = () => { logState.w = wEl.value; };
+    if (rEl) rEl.oninput = () => { logState.r = rEl.value; };
+    if (nEl) nEl.oninput = () => { logState.setNote = nEl.value; };
+    $$('[data-dw]').forEach((b) => { b.onclick = () => { const v = Math.max(0, Math.round(((parseFloat(logState.w) || 0) + Number(b.dataset.dw)) * 100) / 100); logState.w = v; wEl.value = v; }; });
+    $$('[data-dr]').forEach((b) => { b.onclick = () => { const v = Math.max(1, (parseInt(logState.r, 10) || 0) + Number(b.dataset.dr)); logState.r = v; rEl.value = v; }; });
+    if ($('#finish-set')) $('#finish-set').onclick = () => {
+      const reps = parseInt(logState.r, 10);
+      if (!reps || reps < 1) return toast('Enter reps');
+      const wRaw = String(logState.w).trim();
+      const weight = wRaw === '' || /^bw$/i.test(wRaw) ? null : parseFloat(wRaw);
+      if (weight !== null && isNaN(weight)) return toast('Weight must be a number (blank = bodyweight)');
+      logState.setsList.push({ weight, reps, warmup: logState.setMode === 'warmup', note: logState.setNote.trim() });
+      logState.setNote = '';
+      if (navigator.vibrate) navigator.vibrate(30);
+      render();
+      startTimer(logState.setMode === 'warmup' ? WARMUP_REST : rest);
+    };
     $('#finish-session').onclick = () => finishSession(s);
     $('#discard-session').onclick = () => { if (confirm('Discard this session? Exercises already pushed to the sheet stay there.')) { Log.discard(s); logState.exercise = ''; render(); } };
     drawTimer();
@@ -579,9 +733,12 @@
       if (pr && Data.planStatus(pr) !== 'DONE' && /run|jog|tempo|interval|race/i.test(pr.session)) {
         queue('updatePlanStatus', { date: pr.iso, status: 'DONE', notes: `Done · ${km}km${pace ? ' @ ' + pace + '/km' : ''}` });
       }
-    } else {
+    } else if (logState.freeText) {
       sets = logState.sets.trim();
       if (!sets) return toast('Enter your sets');
+    } else {
+      if (!logState.setsList.length) return toast('Log at least one set');
+      sets = buildSetsString(logState.setsList);
     }
     Log.addExercise(s, name, sets, notes);
 
@@ -593,6 +750,7 @@
       } else if (!prog.newStart) toast(`🎉 Top of range — add ${prog.plan.increment} next time`, 3500);
     }
     logState.exercise = ''; logState.sets = ''; logState.notes = ''; logState.runKm = ''; logState.runPace = '';
+    logState.setsList = []; logState.setMode = 'warmup'; logState.setNote = '';
     stopTimer();
     render();
   }
@@ -788,13 +946,17 @@
   // ============================================================
   // ROUTER / GLOBAL EVENTS
   // ============================================================
+  let lastRoute = '';
   function render() {
     const hash = location.hash.replace(/^#/, '') || 'home';
     const [name, arg] = hash.split('/');
     const fn = routes[name] || routes.home;
     $$('.tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.tab === (name === 'exercise' ? 'exercises' : name)));
+    const y = window.scrollY;
     fn(arg);
-    window.scrollTo(0, 0);
+    // New screen → top. Same screen re-rendering (a set logged, sync finished) → stay put.
+    if (hash !== lastRoute) window.scrollTo(0, 0); else window.scrollTo(0, y);
+    lastRoute = hash;
     drawBadge();
   }
 

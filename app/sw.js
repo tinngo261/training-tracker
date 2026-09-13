@@ -1,6 +1,6 @@
 /* Training Tracker service worker — caches the app shell so the app opens
  * with no network. API calls to script.google.com are never intercepted. */
-const VERSION = 'tt-v1';
+const VERSION = 'tt-v2';
 const SHELL = [
   './', './index.html', './styles.css', './app.js',
   './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'
