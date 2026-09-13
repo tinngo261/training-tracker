@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Training">
+  <title>Training Tracker</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Training Tracker</div>
+    <button id="syncBadge" class="sync-badge" type="button" title="Sync status">…</button>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="tabbar">
+    <a href="#home" data-tab="home"><span class="ico">🏠</span>Home</a>
+    <a href="#log" data-tab="log"><span class="ico">➕</span>Log</a>
+    <a href="#history" data-tab="history"><span class="ico">📅</span>History</a>
+    <a href="#exercises" data-tab="exercises"><span class="ico">🏋️</span>Exercises</a>
+    <a href="#plan" data-tab="plan"><span class="ico">🏃</span>Plan</a>
+    <a href="#settings" data-tab="settings"><span class="ico">⚙️</span>More</a>
+  </nav>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
